@@ -1,0 +1,11 @@
+# Copy next to the working docker-compose.yml as docker-compose.override.yml,
+# or pass explicitly: docker compose -f docker-compose.yml -f this.yml up -d
+#
+# First check which compose file the deployment actually uses:
+#   docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' <container>
+services:
+  hermes-webui:
+    image: ${EKKO_CUSTOM_IMAGE:-ekko-docker:v0.8.30}
+    # Must match RUNTIME_UID/RUNTIME_GID used at build time, otherwise the build-time
+    # chown targets the wrong owner and the bug comes back.
+    user: "${RUNTIME_UID:-1000}:${RUNTIME_GID:-1000}"
