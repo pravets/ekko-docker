@@ -1,115 +1,126 @@
 # ekko-docker
 
-Кастомный Docker-образ [Ekko Studio](https://github.com/EKKOLearnAI/ekko-studio)
-с починенными правами на `$HOME`, non-root рантаймом и предустановленным `gh` CLI.
+Кастомный Docker-образ [Ekko Studio](https://github.com/EKKOLearnAI/ekko-studio):
+починенные права на `$HOME`, полноценный надзор s6-overlay (PID 1 = `/init`),
+предустановленный `gh` CLI.
 
 ## Зачем
 
-В апстримном образе (`ekkoye8888/hermes-web-ui`, поверх `nousresearch/hermes-agent`):
+В апстримном образе (`ekkoye8888/hermes-web-ui` поверх `nousresearch/hermes-agent`):
 
-- `ENV HOME=/home/agent`, но каталог `/home/agent` **никто не создаёт и не `chown`'ит** —
-  он остаётся `root:root 755`. Рантайм под uid 1000 не может создать `~/.config`,
-  `~/.local`, `~/.bashrc`, `~/.ssh`.
-- Образ заканчивается на `USER root`, а деплой стартует контейнер под «голым» числовым
-  uid без записи в `/etc/passwd`.
-- В `/etc/passwd` есть только `hermes` (uid **10000**, home `/opt/data`), а `/usr/local/bin`
-  принадлежит uid **1001** — ни один не совпадает с рантаймом.
+1. **`$HOME` сломан.** `ENV HOME=/home/agent`, но каталог никто не создаёт и не `chown`'ит —
+   он остаётся `root:root 755`. Рантайм не может создать `~/.config`, `~/.local`,
+   `~/.bashrc`, `~/.ssh`.
+2. **s6 выброшен.** В `nousresearch/hermes-agent` есть s6-overlay 3.2.3 с сервисами
+   `main-hermes`, `dashboard` и `profile-gateways` (вложенный `s6-svscan`, который
+   надзирает per-profile гейтвеи в `/run/hermes-service`). Но `start-studio-all.sh`
+   делает `exec node ...`, поэтому PID 1 — это `node`, а не `/init`. Дерево надзора
+   мертво.
+3. **Следствие для cron.** `hermes gateway install` определяет менеджер сервисов
+   (`detect_service_manager()` → `_s6_running()` → `container`) и отказывается:
+   «the container runtime is your service manager». Гейтвей приходится запускать
+   руками в фоне, он не переживает падение и не восстанавливается после рестарта.
 
-Этот образ закрывает все три пункта на этапе сборки.
+Этот образ закрывает все три пункта.
 
 ## Что делает Dockerfile
 
-1. Ребейз на **опубликованный** тег Studio (не сборка из исходников: `npm ci` + Vite —
-   десятки минут и гигабайты; слой с apt — 1–2 минуты).
+1. Ребейз на **опубликованный** тег Studio (сборка из исходников — `npm ci` + Vite,
+   десятки минут и гигабайты; apt-слой — 1–2 минуты).
 2. Debian-утилиты: `jq yq less tree htop unzip zip rsync gnupg ripgrep fd-find bat fzf
-   sqlite3 vim-tiny procps` (+ симлинки `fd`/`bat`).
-3. **`gh`** из официального apt-репозитория `cli.github.com`
-   (2.105.0; в `trixie/main` только 2.46.0).
-4. Учётка `agent` с нужным uid/gid, `chown` на `/home/agent`, готовые
-   `.config .local .cache .ssh` и `.bashrc`.
-5. `USER <uid>:<gid>` в конце — **non-root по умолчанию**.
+   sqlite3 vim-tiny procps` (+ симлинки `fd`, `bat`).
+3. **`gh`** из официального apt-репозитория `cli.github.com` (2.106.0; в `trixie/main`
+   только 2.46.0).
+4. Создаёт и `chown`'ит `/home/agent`, готовит `.config .local .cache .ssh` и `.bashrc`.
+5. Ставит s6-сервис `studio` в bundle `user` и возвращает `ENTRYPOINT /init`.
 
-Volume'ы `/home/agent/.hermes` и `/home/agent/.hermes-web-ui` не трогаются: они
-монтируются поверх слоя и сохраняют свои права.
+## Контракт рантайма (важно, это breaking change)
+
+**Контейнер должен стартовать как root.** Это не «root ради root»:
+
+- s6 stage2 (`/etc/cont-init.d/01-hermes-setup`) делает UID/GID remap (`usermod -u`),
+  `chown` data-volume и seed конфигов — всё это требует root;
+- `stage2-hook.sh` **явно отвергает** запуск с произвольным `--user <uid>` и
+  подсказывает правильный путь;
+- сам сервер работает **не** под root: `docker/s6-rc.d/studio/run` делает
+  `exec /command/s6-setuidgid hermes node ...`.
+
+Поэтому вместо `user:` uid передаётся переменными:
+
+```yaml
+environment:
+  - HERMES_UID=1000
+  - HERMES_GID=1000
+```
+
+`Dockerfile` ставит `ENV HERMES_UID=${RUNTIME_UID}`, так что если собирать под тот же
+uid, что и запускать, — переменные можно не задавать.
+
+Второе следствие: **`--user 1234` больше не поддерживается** (в предыдущей версии
+образа был OpenShift-паттерн). Взамен получаем настоящий надзор и работающий
+`hermes gateway install`.
+
+## Что даёт s6
+
+- Studio — supervised longrun: упал сервер → s6 перезапускает его.
+- `finish`-скрипт гасит контейнер, когда сервис умер окончательно, поэтому
+  `restart: unless-stopped` продолжает работать как раньше.
+- Гейтвеи: `hermes gateway install` → `hermes -p <profile> gateway start` создаёт слот
+  в `/run/hermes-service`, его надзирает `profile-gateways`, а
+  `cont-init.d/02-reconcile-profiles` восстанавливает слоты из data-volume при загрузке.
+  Cron больше не зависит от вручную запущенного процесса.
 
 ## Важно про теги
 
 Нумерация тегов на Docker Hub **немонотонна**: `v1.1.0` опубликован 2026-11-17,
-`v0.8.30` — 2026-11-21, и `latest` указывал на `v0.8.30`. Проверяй дату сборки,
-а не строку версии:
+`v0.8.30` — 2026-11-21, `latest` указывал на `v0.8.30`. Проверяй дату сборки:
 
 ```bash
 ./scripts/check-base.sh                  # список тегов
-./scripts/check-base.sh v1.1.0 v0.8.30   # created для конкретных тегов
+./scripts/check-base.sh v1.1.0 v0.8.30   # created для конкретных
 ```
 
 Скрипт работает через registry API — docker-демон не нужен.
 
-## Сборка
+## Сборка и проверка
 
 ```bash
-# uid/gid должны совпадать с тем, под чем реально стартует контейнер:
-docker inspect -f '{{.Config.User}} | {{.HostConfig.User}}' <container>
-
-make build RUNTIME_UID=1000 RUNTIME_GID=1000
-# или
-docker build --build-arg RUNTIME_UID=1000 --build-arg RUNTIME_GID=1000 \
-  -t ekko-docker:v0.8.30 .
+make build                     # RUNTIME_UID/RUNTIME_GID берутся из id -u / id -g
+make verify                    # грузит контейнер, проверяет всё, гасит
+make verify-quick              # только проверки слоя образа
 ```
 
-Проверка, что права действительно починились (нужен docker-демон):
+`verify.sh` поднимает реальный контейнер и проверяет:
 
-```bash
-make verify IMAGE=ekko-docker:v0.8.30
-```
+| проверка | почему |
+|---|---|
+| default user = root | иначе stage2 не сделает remap |
+| сервис `studio` в bundle | иначе `/init` ничего не запустит |
+| PID 1 = `/init` | иначе s6 inert |
+| `s6-svstat` = up | сервис реально поднялся |
+| uid процесса = `HERMES_UID` | non-root соблюдён |
+| `$HOME` писабелен для `hermes` | исходный баг закрыт |
+| `/home/agent/.hermes` owner = uid | stage2 chown сработал |
+| `gateway install` ≠ container-backend | цель варианта B достигнута |
+| контейнер умирает вместе с сервисом | restart-политика не сломана |
 
 ## Подключение к деплою
-
-Апстримный compose берёт образ из `WEBUI_IMAGE`. Скопируй
-`compose.override.example.yml` рядом с рабочим compose как
-`docker-compose.override.yml`, либо передай `-f` явно.
-
-Сначала проверь, **какой** compose-файл реально используется:
 
 ```bash
 docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' <container>
 ```
 
-Если его генерирует само приложение Studio, правка может затираться при обновлении —
-тогда надёжнее держать override отдельно.
-
-## Если рантайм стартует под другим uid
-
-`chown` на сборке привязан к `RUNTIME_UID`, но образ также работает под
-**любым uid**, если gid совпадает с билдовым или равен 0 (OpenShift-паттерн):
-`/home/agent` и dot-каталоги принадлежат группе 0, group-writable, с setgid-битом —
-новые файлы наследуют группу 0. `docker run --user 1234` даёт gid 0 по умолчанию,
-так что это работает из коробки; в compose — `user: "1234"` или `user: "1234:0"`.
-
-Ограничения произвольного uid:
-- записи в `/etc/passwd` нет — шелл покажет `I have no name!`, это косметика;
-  `gh`/`git` работают, им нужен только writable `$HOME`;
-- файлы, созданные чужим uid, останутся его собственностью (umask 022 снимает
-  group-write) — при возврате на билдовый uid они могут стать read-only;
-- если и gid произвольный (не 0 и не билдовый) — группа не поможет, пересобирай
-  с нужными `RUNTIME_UID`/`RUNTIME_GID`.
-
-CI проверяет оба сценария: uid 1000 (билдовый) и uid 1234/gid 0 (произвольный).
+Затем `compose.override.example.yml` → `docker-compose.override.yml`. Из override
+обязательно убрать `user:` (см. контракт рантайма) и добавить `HERMES_UID`.
 
 ## Что остаётся эфемерным
 
-Volume'ы только два: `/home/agent/.hermes` и `/home/agent/.hermes-web-ui`.
-Всё остальное под `$HOME` — слой образа/контейнера: переживает `restart`, но не
-`compose down`. Значит:
-
-- утилиты, вшитые в образ, вернутся после пересборки — это нормально;
-- `apt install` руками внутри контейнера смысла не имеет;
-- **логины CLI** (`gh auth`, `~/.ssh`, `~/.config`) слетают при пересоздании. Нужна
-  персистентность — монтируй `/home/agent` целиком (тогда права ведёт хостовый uid,
-  и слой с `chown` перекрывается).
-
-Для «положить и забыть» без пересборки есть volume-путь `~/.hermes/bin` — он в `PATH`.
+Volume'ы только два: `/home/agent/.hermes` и `/home/agent/.hermes-web-ui`. Всё
+остальное под `$HOME` — слой образа: переживает `restart`, не переживает `compose down`.
+Логины CLI (`gh auth`, `~/.ssh`) слетают при пересоздании; для персистентности
+монтируй `/home/agent` целиком.
 
 ## CI
 
-`.github/workflows/build.yml`: hadolint + сборка + `scripts/verify.sh` под uid 1000.
+`.github/workflows/build.yml`: hadolint → сборка → `scripts/verify.sh` (полный
+жизненный цикл контейнера).

@@ -1,0 +1,10 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Studio exited: bring the container down.
+#
+# Docker/Compose restart policies are container-level, so letting the container
+# exit is what makes `restart: unless-stopped` behave exactly as it did before
+# we introduced s6. Without this, /init would keep supervising a dead service
+# forever and the container would look healthy while serving nothing.
+/command/s6-svscanctl -t /run/service 2>/dev/null || kill -TERM 1
+exit 0

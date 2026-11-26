@@ -25,7 +25,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: build
         run: docker build --build-arg RUNTIME_UID=1000 --build-arg RUNTIME_GID=1000 -t ekko-docker:ci .
-      - name: verify as non-root uid 1000
-        run: RUNTIME_UID=1000 RUNTIME_GID=1000 ./scripts/verify.sh ekko-docker:ci
-      - name: verify as arbitrary uid 1234 (gid 0)
-        run: RUNTIME_UID=1234 RUNTIME_GID=0 ./scripts/verify.sh ekko-docker:ci
+
+      # Variant B runtime contract: container starts as root, services drop to
+      # HERMES_UID. This boots the real image, waits for :6060, asserts the s6
+      # tree and gateway detection, then kills the server and asserts the
+      # container goes down.
+      - name: verify supervised runtime
+        run: ./scripts/verify.sh ekko-docker:ci
+
+      - name: container logs on failure
+        if: failure()
+        run: docker logs --tail 100 $(docker ps -aq | head -1) || true

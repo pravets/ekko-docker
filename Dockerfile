@@ -47,41 +47,55 @@ RUN install -d -m 0755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/* \
     && gh --version
 
-# --- Fix $HOME ownership + create a real non-root account ---
-# Upstream sets ENV HOME=/home/agent but never creates or chowns it, so the runtime uid
-# cannot create ~/.config, ~/.local, ~/.bashrc, ~/.ssh.
+# --- Fix $HOME ownership ---
+# Upstream sets ENV HOME=/home/agent but never creates or chowns it, so the runtime
+# uid cannot create ~/.config, ~/.local, ~/.bashrc, ~/.ssh.
 # Only the image-layer part of $HOME is touched: /home/agent/.hermes and
 # /home/agent/.hermes-web-ui are volumes mounted at runtime and keep their own
-# ownership. Never chown those recursively.
-# hadolint ignore=SC2016
-# Arbitrary-uid support (OpenShift pattern): besides the named account, $HOME and
-# its dot-dirs are group-0 writable with the setgid bit, so the image also works
-# when started as ANY uid with gid 0 (`docker run --user 1234` defaults to gid 0)
-# or with the build gid. setgid makes new files inherit group 0.
+# ownership (stage2-hook chowns HERMES_HOME at boot). Never chown those recursively.
+#
+# No account is created here on purpose: the base image already ships `hermes`
+# (uid 10000) and s6-overlay stage2 remaps it to HERMES_UID at boot. Creating a
+# second account on that uid would make `usermod -u` collide and abort the boot.
 # hadolint ignore=SC2016
 RUN set -eux; \
-    if ! getent group "${RUNTIME_GID}" >/dev/null; then \
-        groupadd -g "${RUNTIME_GID}" "${RUNTIME_USER}"; \
-    fi; \
-    if ! getent passwd "${RUNTIME_UID}" >/dev/null; then \
-        useradd -l -u "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
-                -d /home/agent -s /bin/bash -M "${RUNTIME_USER}"; \
-    fi; \
     install -d -m 2775 -o "${RUNTIME_UID}" -g 0 /home/agent; \
     install -d -m 2770 -o "${RUNTIME_UID}" -g 0 \
         /home/agent/.config /home/agent/.local /home/agent/.local/bin \
         /home/agent/.cache /home/agent/.ssh; \
+    install -d -m 2775 -o "${RUNTIME_UID}" -g 0 /home/agent/.hermes/bin; \
     printf 'export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"\n' > /home/agent/.bashrc; \
     chown "${RUNTIME_UID}:0" /home/agent/.bashrc; \
     chmod 0664 /home/agent/.bashrc
 
-# Volume-backed tool dir: survives container recreation, unlike image layers.
-RUN install -d -m 2775 -o "${RUNTIME_UID}" -g 0 /home/agent/.hermes/bin
-
 ENV PATH=/home/agent/.local/bin:/home/agent/.hermes/bin:${PATH}
 
-# Non-root by default. Upstream ends on `USER root`, so a plain `docker run` of it makes
-# the data volumes root-owned - a regression worse than the original problem.
-# hadolint ignore=DL3066
-USER ${RUNTIME_UID}:${RUNTIME_GID}
-WORKDIR /app
+# --- Variant B: s6 supervision, PID 1 = /init ---
+# The base image ships s6-overlay 3.2.3 and the Studio entrypoint threw it away by
+# exec'ing node directly. With PID 1 = node, s6 is inert and `hermes gateway
+# install` dispatches to the "container" backend, refusing to install anything.
+# Restoring /init gives us the supervision tree: per-profile gateway slots
+# (/run/hermes-service, supervised by the image's profile-gateways service) and
+# automatic restart of the Studio server.
+#
+# CONSEQUENCE, and it is not optional: stage2-hook.sh REJECTS a container started
+# with an arbitrary `--user <uid>` (bootstrap needs root: UID remap, volume chown,
+# config seeding). So this image must start as root and hand the uid in via
+# HERMES_UID/HERMES_GID. Every service drops privileges with s6-setuidgid, so no
+# application process runs as root.
+ENV HERMES_UID=${RUNTIME_UID}
+ENV HERMES_GID=${RUNTIME_GID}
+
+COPY docker/ /app/docker/
+RUN chmod +x /app/docker/entrypoint.sh \
+        /app/docker/s6-rc.d/studio/run \
+        /app/docker/s6-rc.d/studio/finish \
+    && cp -R /app/docker/s6-rc.d/. /etc/s6-overlay/s6-rc.d/
+
+# Bootstrap must run as root; the supervised server does not.
+# DL3002 is knowingly suppressed: s6 stage2 needs root for usermod + volume chown,
+# and every longrunning service drops to HERMES_UID via s6-setuidgid.
+# hadolint ignore=DL3002,DL3066
+USER root
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
+CMD []

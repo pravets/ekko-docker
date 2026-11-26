@@ -1,45 +1,134 @@
 #!/usr/bin/env bash
-# Verify the image really fixes $HOME permissions and ships gh, running as the
-# non-root runtime uid. Requires a working docker daemon.
+# Verify the image: $HOME permissions, gh, and the s6 supervision tree.
+#
+# Variant B changed the runtime contract: the container starts as ROOT
+# (/init needs it for UID remap + volume chown) and every service drops to
+# HERMES_UID with s6-setuidgid. So this script passes HERMES_UID instead of
+# `--user`, and checks the *studio process* is non-root rather than the shell.
+#
+#   ./scripts/verify.sh <image>          # full: boot container, check, stop
+#   ./scripts/verify.sh <image> --quick  # image-layer checks only
 set -euo pipefail
 
-IMAGE="${1:?usage: verify.sh <image>}"
+IMAGE="${1:?usage: verify.sh <image> [--quick]}"
+MODE="${2:-full}"
 UID_ARG="${RUNTIME_UID:-1000}"
 GID_ARG="${RUNTIME_GID:-1000}"
-OUT="$(mktemp)"
-trap 'rm -f "$OUT"' EXIT
-
+NAME="ekko-verify-$$"
 fail=0
-check() {
-  local name="$1"; shift
-  if docker run --rm --user "${UID_ARG}:${GID_ARG}" --entrypoint /bin/bash "$IMAGE" -lc "$*" >"$OUT" 2>&1; then
-    printf '  ok   %s\n' "$name"
-  else
-    printf '  FAIL %s\n' "$name"
-    sed 's/^/       /' "$OUT"
-    fail=1
-  fi
-}
 
-echo "verifying $IMAGE as ${UID_ARG}:${GID_ARG}"
-check 'non-root runtime'      '[ "$(id -u)" != 0 ]'
-check 'uid matches build arg' '[ "$(id -u)" = '"${UID_ARG}"' ]'
-check 'HOME writable'         'touch "$HOME/.permcheck" && rm -f "$HOME/.permcheck"'
-check 'config creatable'      'mkdir -p "$HOME/.config/probe" && rmdir "$HOME/.config/probe"'
-check 'local/bin writable'    'touch "$HOME/.local/bin/probe" && rm -f "$HOME/.local/bin/probe"'
-check 'bashrc writable'       'printf "# probe\n" >> "$HOME/.bashrc"'
-check 'gh present'            'gh --version'
-check 'jq present'            'jq --version'
-check 'fd and bat symlinks'   'fd --version && bat --version'
-# passwd entry is expected only for the build uid; arbitrary uids run nameless
-if docker run --rm --user "${UID_ARG}:${GID_ARG}" --entrypoint /bin/bash "$IMAGE" -lc 'getent passwd "$(id -u)"' >"$OUT" 2>&1; then
-  printf '  ok   passwd entry exists\n'
+pass() { printf '  ok   %s\n' "$1"; }
+note() { printf '  note %s\n' "$1"; }
+bad()  { printf '  FAIL %s\n' "$1"; fail=1; }
+
+in_container() { docker exec "$NAME" /usr/bin/env HOME=/home/agent sh -c "$1"; }
+as_hermes()    { docker exec "$NAME" /command/s6-setuidgid hermes sh -c "$1"; }
+
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+echo "== image-layer checks =="
+id_out=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'id -u; cat /etc/passwd | wc -l' 2>&1) || true
+if printf '%s' "$id_out" | head -1 | grep -qx 0; then
+  pass "default user is root (required by s6 stage2)"
 else
-  printf '  note no passwd entry for uid %s (arbitrary-uid run, OK if HOME writable)\n' "${UID_ARG}"
+  bad "default user is not root: $(printf '%s' "$id_out" | head -1)"
+fi
+
+docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'test -x /app/docker/entrypoint.sh' \
+  && pass "entrypoint present" || bad "entrypoint missing"
+docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+  'test -f /etc/s6-overlay/s6-rc.d/studio/run && test -f /etc/s6-overlay/s6-rc.d/user/contents.d/studio' \
+  && pass "studio s6 service installed into the user bundle" || bad "studio s6 service missing"
+docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'command -v gh' >/dev/null \
+  && pass "gh present" || bad "gh missing"
+docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'command -v jq && command -v fd && command -v bat' >/dev/null \
+  && pass "jq/fd/bat present" || bad "jq/fd/bat missing"
+
+if [ "$MODE" = "--quick" ]; then
+  echo; [ "$fail" -eq 0 ] && echo "quick checks passed" || echo "checks FAILED"; exit "$fail"
 fi
 
 echo
-docker run --rm --user "${UID_ARG}:${GID_ARG}" --entrypoint /bin/bash "$IMAGE" \
-  -lc 'id; echo "HOME=$HOME"; ls -ld "$HOME"; gh --version | head -1'
+echo "== booting container as root with HERMES_UID=${UID_ARG} =="
+docker run -d --name "$NAME" \
+  -e HERMES_UID="$UID_ARG" -e HERMES_GID="$GID_ARG" \
+  "$IMAGE" >/dev/null
 
+for _ in $(seq 1 60); do
+  if docker exec "$NAME" sh -c 'curl -fsS -o /dev/null http://127.0.0.1:6060/ 2>/dev/null'; then break; fi
+  sleep 2
+done
+
+echo "== runtime checks =="
+if docker exec "$NAME" sh -c 'curl -fsS -o /dev/null http://127.0.0.1:6060/' 2>/dev/null; then
+  pass "studio answers on :6060"
+else
+  bad "studio does not answer on :6060"; docker logs --tail 30 "$NAME" | sed 's/^/       /'
+fi
+
+docker exec "$NAME" sh -c 'test "$(id -u 1 2>/dev/null || echo 0)" = 0' >/dev/null 2>&1 || true
+pid1_cmd=$(docker exec "$NAME" cat /proc/1/cmdline | tr '\0' ' ')
+case "$pid1_cmd" in
+  */init*|*s6-svscan*) pass "PID 1 is the s6 supervisor ($pid1_cmd)" ;;
+  *) bad "PID 1 is not s6: $pid1_cmd" ;;
+esac
+
+svstat=$(docker exec "$NAME" /command/s6-svstat /run/service/studio 2>&1 || true)
+case "$svstat" in
+  up*) pass "s6 reports studio $svstat" ;;
+  *) bad "s6 does not report studio up: $svstat" ;;
+esac
+
+studio_uid=$(docker exec "$NAME" sh -c \
+  "ps -o uid= -p \$(pgrep -f 'dist/server/index.js' | head -1) 2>/dev/null | tr -d ' '" || true)
+if [ "${studio_uid:-x}" = "$UID_ARG" ]; then
+  pass "studio runs as uid ${UID_ARG} (non-root)"
+else
+  bad "studio uid is '${studio_uid:-?}', expected ${UID_ARG}"
+fi
+
+if as_hermes 'touch "$HOME/.permcheck" && rm -f "$HOME/.permcheck" && mkdir -p "$HOME/.config/p" && rmdir "$HOME/.config/p"'; then
+  pass "\$HOME writable by hermes"
+else
+  bad "\$HOME not writable by hermes"
+fi
+
+if as_hermes 'gh --version' >/dev/null 2>&1; then pass "gh runs as hermes"; else bad "gh fails as hermes"; fi
+
+hc_owner=$(docker exec "$NAME" stat -c '%u' /home/agent/.hermes 2>/dev/null || echo '?')
+if [ "$hc_owner" = "$UID_ARG" ]; then
+  pass "HERMES_HOME owned by uid ${UID_ARG} (stage2 chown worked)"
+else
+  bad "HERMES_HOME owner is ${hc_owner}, expected ${UID_ARG}"
+fi
+
+# The whole point of variant B: gateway install must no longer fall back to the
+# "container runtime is your service manager" answer.
+gi=$(docker exec "$NAME" sh -c 'hermes gateway install 2>&1' || true)
+if printf '%s' "$gi" | grep -qi 'container runtime is your service manager'; then
+  bad "gateway install still dispatches to the container backend"
+elif printf '%s' "$gi" | grep -qiE 's6|profile create|auto-?register'; then
+  pass "gateway install detects the s6 backend"
+else
+  note "gateway install output: $(printf '%s' "$gi" | head -2 | tr '\n' ' ')"
+  bad "gateway install did not report the s6 backend"
+fi
+
+echo
+echo "== shutdown semantics =="
+docker exec "$NAME" sh -c "pkill -f 'dist/server/index.js'" >/dev/null 2>&1 || true
+gone=0
+for _ in $(seq 1 30); do
+  if ! docker ps -q --filter "name=^/${NAME}$" | grep -q .; then gone=1; break; fi
+  sleep 1
+done
+if [ "$gone" = 1 ]; then
+  pass "container exits when the studio service dies (restart policy keeps working)"
+else
+  bad "container stayed up after studio died (finish script broken)"
+fi
+
+echo
+[ "$fail" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "CHECKS FAILED"
 exit "$fail"

@@ -1,11 +1,15 @@
 # Copy next to the working docker-compose.yml as docker-compose.override.yml,
 # or pass explicitly: docker compose -f docker-compose.yml -f this.yml up -d
 #
-# First check which compose file the deployment actually uses:
+# Check which compose file the deployment actually uses first:
 #   docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' <container>
 services:
   hermes-webui:
     image: ${EKKO_CUSTOM_IMAGE:-ekko-docker:v0.8.30}
-    # Must match RUNTIME_UID/RUNTIME_GID used at build time, otherwise the build-time
-    # chown targets the wrong owner and the bug comes back.
-    user: "${RUNTIME_UID:-1000}:${RUNTIME_GID:-1000}"
+    # s6-overlay's stage2 bootstrap needs root for the UID remap and the volume
+    # chown; the Studio server itself is dropped to HERMES_UID by s6-setuidgid.
+    # Do NOT set `user:` here - an arbitrary --user makes stage2 abort.
+    environment:
+      - HERMES_UID=${RUNTIME_UID:-1000}
+      - HERMES_GID=${RUNTIME_GID:-1000}
+    restart: unless-stopped

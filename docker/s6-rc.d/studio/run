@@ -1,0 +1,27 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Studio web server as a supervised s6 service.
+#
+# Why a service and not the container CMD: with PID 1 = /init the whole
+# supervision tree exists, so `hermes gateway install/start` dispatches to the
+# s6 backend and per-profile gateways get supervised slots. Before, the upstream
+# entrypoint exec'd node directly, PID 1 was node, s6 was inert, and gateway
+# install refused with "the container runtime is your service manager".
+#
+# /command is used explicitly: the container PATH from the base image does not
+# include the s6 symlink dir, so bare `s6-setuidgid` would not resolve.
+#
+# Privilege drop: /init and this run script execute as root (the bootstrap needs
+# it), the server itself runs as `hermes`, which stage2 remapped to
+# HERMES_UID (= RUNTIME_UID at build time).
+
+export HOME="${HOME:-/home/agent}"
+
+cd /app || exit 1
+
+# Skip the drop when already non-root (weaker runtime, e.g. --user pinned).
+if [ "$(id -u)" != 0 ]; then
+    exec node /app/dist/server/index.js
+fi
+
+exec /command/s6-setuidgid hermes node /app/dist/server/index.js
