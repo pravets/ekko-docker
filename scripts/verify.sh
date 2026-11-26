@@ -48,6 +48,19 @@ docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'command -v gh' >/dev/null \
 docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'command -v jq && command -v fd && command -v bat' >/dev/null \
   && pass "jq/fd/bat present" || bad "jq/fd/bat missing"
 
+# glab and tea are installed from upstream releases (Debian's `tea` is a Qt editor),
+# so their presence and runnability is worth asserting, not assuming.
+glab_ver=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'HOME=/tmp glab version 2>&1' || true)
+case "$glab_ver" in
+  glab\ *) pass "glab: ${glab_ver}" ;;
+  *) bad "glab not runnable: ${glab_ver:-<empty>}" ;;
+esac
+tea_ver=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'HOME=/tmp tea --version 2>&1' || true)
+case "$tea_ver" in
+  Version:\ *) pass "tea: ${tea_ver}" ;;
+  *) bad "tea not runnable: ${tea_ver:-<empty>}" ;;
+esac
+
 if [ "$MODE" = "--quick" ]; then
   echo; [ "$fail" -eq 0 ] && echo "quick checks passed" || echo "checks FAILED"; exit "$fail"
 fi

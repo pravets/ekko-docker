@@ -29,8 +29,17 @@
    десятки минут и гигабайты; apt-слой — 1–2 минуты).
 2. Debian-утилиты: `jq yq less tree htop unzip zip rsync gnupg ripgrep fd-find bat fzf
    sqlite3 vim-tiny procps` (+ симлинки `fd`, `bat`).
-3. **`gh`** из официального apt-репозитория `cli.github.com` (2.106.0; в `trixie/main`
-   только 2.46.0).
+3. Ставит три CLI для git-хостингов:
+
+   | CLI | откуда | версия | почему не из Debian |
+   |---|---|---|---|
+   | `gh` | apt-репо `cli.github.com` | 2.106.0 | в `trixie/main` только 2.46.0 |
+   | `glab` (GitLab) | релиз gitlab.com | 1.133.0 | в `trixie/main` 1.53.0 — на десятки релизов позади |
+   | `tea` (Gitea) | релиз gitea.com | 0.16.0 | пакет `tea` в Debian — **Qt-редактор**, а не Gitea CLI |
+
+   Оба бинарника качаются с проверкой sha256 по контрольным суммам того же релиза:
+   испорченная или подменённая загрузка валит сборку, а не проходит молча.
+   Версии закреплены аргументами `GLAB_VERSION`/`TEA_VERSION` в `Dockerfile`.
 4. Создаёт и `chown`'ит `/home/agent`, готовит `.config .local .cache .ssh` и `.bashrc`.
 5. Ставит s6-сервис `studio` в bundle `user` и возвращает `ENTRYPOINT /init`.
 
@@ -107,6 +116,7 @@ make verify-quick              # только проверки слоя обра
 | `$HOME` писабелен для `hermes` | исходный баг закрыт |
 | `/home/agent/.hermes` owner = uid | stage2 chown сработал |
 | `gateway install` ≠ container-backend | цель варианта B достигнута |
+| `glab version`, `tea --version` | CLI собраны и запускаются |
 | контейнер умирает вместе с сервисом | restart-политика не сломана |
 
 ## Подключение к деплою

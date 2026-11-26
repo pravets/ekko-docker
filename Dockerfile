@@ -21,6 +21,10 @@ ARG RUNTIME_UID=1000
 ARG RUNTIME_GID=1000
 ARG RUNTIME_USER=agent
 
+# Version pins for the two CLIs installed from upstream releases.
+ARG GLAB_VERSION=1.133.0
+ARG TEA_VERSION=0.16.0
+
 # Extra Debian packages; all verified present in trixie/main.
 ARG EXTRA_PACKAGES="jq yq less tree htop unzip zip rsync gnupg ripgrep fd-find bat fzf sqlite3 vim-tiny procps"
 
@@ -47,6 +51,43 @@ RUN install -d -m 0755 /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* \
     && gh --version
+
+# --- GitLab CLI (glab) and Gitea CLI (tea) ---
+# Neither is usable from Debian: trixie ships glab 1.53.0 (dozens of releases behind
+# 1.133.0), and its `tea` package is an unrelated Qt text editor, NOT the Gitea CLI.
+# Both are fetched as verified upstream binaries. Checksums come from the same release,
+# so the build fails loudly on a truncated or swapped download.
+# HOME is redirected to a temp dir: glab/tea create ~/.config on first run, and as root
+# that would leave root-owned files inside $HOME before the ownership fix below.
+RUN set -eux; \
+    tmp="$(mktemp -d)"; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) tea_arch=amd64 ;; \
+        arm64) tea_arch=arm64 ;; \
+        *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    glab_file="glab_${GLAB_VERSION}_linux_${arch}.tar.gz"; \
+    glab_base="https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}"; \
+    curl -fsSL -o "$tmp/$glab_file" "$glab_base/$glab_file"; \
+    curl -fsSL -o "$tmp/glab-checksums.txt" "$glab_base/checksums.txt"; \
+    grep -F "  ${glab_file}" "$tmp/glab-checksums.txt" > "$tmp/glab.line"; \
+    test -s "$tmp/glab.line"; \
+    awk -v d="$tmp/" '{print $1"  "d$2}' "$tmp/glab.line" > "$tmp/glab.expected"; \
+    sha256sum -c --strict "$tmp/glab.expected"; \
+    tar -xzf "$tmp/$glab_file" -C "$tmp"; \
+    install -m 0755 "$tmp/bin/glab" /usr/local/bin/glab; \
+    tea_file="tea-${TEA_VERSION}-linux-${tea_arch}.xz"; \
+    tea_url="https://gitea.com/gitea/tea/releases/download/v${TEA_VERSION}"; \
+    curl -fsSL -o "$tmp/$tea_file" "$tea_url/$tea_file"; \
+    curl -fsSL -o "$tmp/$tea_file.sha256" "$tea_url/$tea_file.sha256"; \
+    awk -v d="$tmp/" '{print $1"  "d$2}' "$tmp/$tea_file.sha256" > "$tmp/tea.expected"; \
+    sha256sum -c --strict "$tmp/tea.expected"; \
+    xz -dc "$tmp/$tea_file" > /usr/local/bin/tea; \
+    chmod 0755 /usr/local/bin/tea; \
+    HOME="$tmp" glab version; \
+    HOME="$tmp" tea --version; \
+    rm -rf "$tmp"
 
 # --- Fix $HOME ownership ---
 # Upstream sets ENV HOME=/home/agent but never creates or chowns it, so the runtime
