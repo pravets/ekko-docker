@@ -27,3 +27,5 @@ jobs:
         run: docker build --build-arg RUNTIME_UID=1000 --build-arg RUNTIME_GID=1000 -t ekko-docker:ci .
       - name: verify as non-root uid 1000
         run: RUNTIME_UID=1000 RUNTIME_GID=1000 ./scripts/verify.sh ekko-docker:ci
+      - name: verify as arbitrary uid 1234 (gid 0)
+        run: RUNTIME_UID=1234 RUNTIME_GID=0 ./scripts/verify.sh ekko-docker:ci

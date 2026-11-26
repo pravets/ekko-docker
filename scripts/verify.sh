@@ -31,7 +31,12 @@ check 'bashrc writable'       'printf "# probe\n" >> "$HOME/.bashrc"'
 check 'gh present'            'gh --version'
 check 'jq present'            'jq --version'
 check 'fd and bat symlinks'   'fd --version && bat --version'
-check 'passwd entry exists'   'getent passwd "$(id -u)"'
+# passwd entry is expected only for the build uid; arbitrary uids run nameless
+if docker run --rm --user "${UID_ARG}:${GID_ARG}" --entrypoint /bin/bash "$IMAGE" -lc 'getent passwd "$(id -u)"' >"$OUT" 2>&1; then
+  printf '  ok   passwd entry exists\n'
+else
+  printf '  note no passwd entry for uid %s (arbitrary-uid run, OK if HOME writable)\n' "${UID_ARG}"
+fi
 
 echo
 docker run --rm --user "${UID_ARG}:${GID_ARG}" --entrypoint /bin/bash "$IMAGE" \

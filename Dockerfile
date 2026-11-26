@@ -54,6 +54,11 @@ RUN install -d -m 0755 /etc/apt/keyrings \
 # /home/agent/.hermes-web-ui are volumes mounted at runtime and keep their own
 # ownership. Never chown those recursively.
 # hadolint ignore=SC2016
+# Arbitrary-uid support (OpenShift pattern): besides the named account, $HOME and
+# its dot-dirs are group-0 writable with the setgid bit, so the image also works
+# when started as ANY uid with gid 0 (`docker run --user 1234` defaults to gid 0)
+# or with the build gid. setgid makes new files inherit group 0.
+# hadolint ignore=SC2016
 RUN set -eux; \
     if ! getent group "${RUNTIME_GID}" >/dev/null; then \
         groupadd -g "${RUNTIME_GID}" "${RUNTIME_USER}"; \
@@ -62,15 +67,16 @@ RUN set -eux; \
         useradd -l -u "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
                 -d /home/agent -s /bin/bash -M "${RUNTIME_USER}"; \
     fi; \
-    install -d -m 0755 -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /home/agent; \
-    install -d -m 0700 -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
+    install -d -m 2775 -o "${RUNTIME_UID}" -g 0 /home/agent; \
+    install -d -m 2770 -o "${RUNTIME_UID}" -g 0 \
         /home/agent/.config /home/agent/.local /home/agent/.local/bin \
         /home/agent/.cache /home/agent/.ssh; \
     printf 'export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"\n' > /home/agent/.bashrc; \
-    chown "${RUNTIME_UID}:${RUNTIME_GID}" /home/agent/.bashrc
+    chown "${RUNTIME_UID}:0" /home/agent/.bashrc; \
+    chmod 0664 /home/agent/.bashrc
 
 # Volume-backed tool dir: survives container recreation, unlike image layers.
-RUN install -d -m 0755 -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /home/agent/.hermes/bin
+RUN install -d -m 2775 -o "${RUNTIME_UID}" -g 0 /home/agent/.hermes/bin
 
 ENV PATH=/home/agent/.local/bin:/home/agent/.hermes/bin:${PATH}
 
