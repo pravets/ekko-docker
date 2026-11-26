@@ -8,6 +8,8 @@
 # v0.8.30 was published 2026-11-21, and `latest` pointed at v0.8.30. Check the image
 # `created` timestamp (scripts/check-base.sh) before bumping this pin.
 ARG BASE_IMAGE=ekkoye8888/hermes-web-ui:v0.8.30
+# The pin lives in the ARG default above; hadolint cannot see through the variable.
+# hadolint ignore=DL3006
 FROM ${BASE_IMAGE}
 
 # uid/gid the container actually runs as. The upstream deployment starts the container
