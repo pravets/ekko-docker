@@ -171,9 +171,11 @@ Workflow проверяет их наличие и, если их нет, про
 
 | триггер | теги |
 |---|---|
-| push в `main` | `latest`, `main`, `sha-<short>`, `studio-v0.8.30` |
+| push в `master` | `latest`, `master`, `sha-<short>`, `studio-v0.8.30` |
 | тег `v1.2.3` | `v1.2.3`, `sha-<short>`, `studio-v0.8.30` |
 | PR | ничего не публикуется |
+
+Ветка по умолчанию — **`master`** (не `main`).
 
 Собирается только `linux/amd64`. Для `arm64` нужен `docker/setup-qemu-action` и
 `platforms: linux/amd64,linux/arm64` (базовый образ arm64 содержит), но тогда
