@@ -3,8 +3,24 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# GHCR needs no extra secrets: the workflow's own GITHUB_TOKEN pushes the
+# package. The repo default is "read", so this block is what grants write.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  RUNTIME_UID: 1000
+  RUNTIME_GID: 1000
+  BASE_STUDIO: v0.8.30
 
 jobs:
   lint:
@@ -23,16 +39,89 @@ jobs:
     needs: lint
     steps:
       - uses: actions/checkout@v4
-      - name: build
-        run: docker build --build-arg RUNTIME_UID=1000 --build-arg RUNTIME_GID=1000 -t ekko-docker:ci .
+      - uses: docker/setup-buildx-action@v3
 
-      # Variant B runtime contract: container starts as root, services drop to
-      # HERMES_UID. This boots the real image, waits for :6060, asserts the s6
-      # tree and gateway detection, then kills the server and asserts the
-      # container goes down.
+      # Docker Hub is optional: without a PAT in repo secrets we still publish
+      # to GHCR. `secrets` is not usable in `if:`, so expose it as an output.
+      - name: detect docker hub credentials
+        id: hub
+        env:
+          HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${HUB_TOKEN}" ] && [ -n "${HUB_USER}" ]; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not set - publishing to GHCR only"
+          fi
+
+      - name: login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: login to Docker Hub
+        if: github.event_name != 'pull_request' && steps.hub.outputs.on == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            name=ghcr.io/${{ github.repository }}
+            name=${{ secrets.DOCKERHUB_USERNAME }}/ekko-docker,enable=${{ steps.hub.outputs.on }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=studio-${{ env.BASE_STUDIO }}
+
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ekko-docker:ci
+          build-args: |
+            RUNTIME_UID=${{ env.RUNTIME_UID }}
+            RUNTIME_GID=${{ env.RUNTIME_GID }}
+            BASE_IMAGE=ekkoye8888/hermes-web-ui:${{ env.BASE_STUDIO }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is only published if it actually passes the runtime smoke test.
       - name: verify supervised runtime
         run: ./scripts/verify.sh ekko-docker:ci
 
+      - name: push
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            docker tag ekko-docker:ci "$tag"
+            docker push "$tag"
+            echo "pushed $tag"
+          done <<< "$TAGS"
+          {
+            echo "### Published images"
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+            docker image inspect ekko-docker:ci --format 'digest: {{json .RepoDigests}}' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: container logs on failure
         if: failure()
-        run: docker logs --tail 100 $(docker ps -aq | head -1) || true
+        run: docker logs --tail 80 $(docker ps -aq | head -1) 2>/dev/null || true

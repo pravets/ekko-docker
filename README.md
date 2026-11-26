@@ -120,7 +120,61 @@ Volume'ы только два: `/home/agent/.hermes` и `/home/agent/.hermes-web
 Логины CLI (`gh auth`, `~/.ssh`) слетают при пересоздании; для персистентности
 монтируй `/home/agent` целиком.
 
-## CI
+## Публикация образов
 
-`.github/workflows/build.yml`: hadolint → сборка → `scripts/verify.sh` (полный
-жизненный цикл контейнера).
+CI (`.github/workflows/build.yml`): hadolint → сборка → `verify.sh` → **push только
+если смоук-тест прошёл**.
+
+### GHCR — ничего не нужно
+
+Пуш идёт от `GITHUB_TOKEN`, который workflow получает сам. В репозитории дефолтные
+права токена — `read`, поэтому нужен явный блок:
+
+```yaml
+permissions:
+  contents: read
+  packages: write
+```
+
+Пакет появляется как `ghcr.io/pravets/ekko-docker`. Для приватного репозитория он
+тоже приватный (видимость наследуется).
+
+Тянуть на хосте:
+
+```bash
+echo "$PAT" | docker login ghcr.io -u pravets --password-stdin   # PAT: read:packages
+docker pull ghcr.io/pravets/ekko-docker:latest
+```
+
+`gh` для этого нужен scope `read:packages`; текущая авторизация в контейнере его не
+имеет (`repo`, `workflow`, `gist`, `read:org`) — если понадобится смотреть пакеты
+через `gh api`, нужен `gh auth refresh -h github.com -s read:packages`.
+
+### Docker Hub — нужны два секрета
+
+Аккаунт Docker Hub + PAT (Account settings → Personal access tokens → **Read & Write**),
+затем в репозитории: Settings → Secrets and variables → Actions:
+
+| секрет | значение |
+|---|---|
+| `DOCKERHUB_USERNAME` | логин на Hub |
+| `DOCKERHUB_TOKEN` | PAT, не пароль |
+
+Workflow проверяет их наличие и, если их нет, просто публикует только в GHCR
+(в лог пишется notice). Появятся — включится автоматически, править YAML не нужно.
+
+Важно про тарифы: на бесплатном плане Docker Hub разрешён **1 приватный**
+репозиторий образов (публичные — без ограничений). Лимиты pull'ов (100/6ч анонимно,
+200/6ч авторизованно) касаются только скачивания с Hub.
+
+### Теги, которые получаются
+
+| триггер | теги |
+|---|---|
+| push в `main` | `latest`, `main`, `sha-<short>`, `studio-v0.8.30` |
+| тег `v1.2.3` | `v1.2.3`, `sha-<short>`, `studio-v0.8.30` |
+| PR | ничего не публикуется |
+
+Собирается только `linux/amd64`. Для `arm64` нужен `docker/setup-qemu-action` и
+`platforms: linux/amd64,linux/arm64` (базовый образ arm64 содержит), но тогда
+`load: true` для verify невозможен — пришлось бы разделять сборку и смоук-тест.
