@@ -125,6 +125,24 @@ Volume'ы только два: `/home/agent/.hermes` и `/home/agent/.hermes-web
 Логины CLI (`gh auth`, `~/.ssh`) слетают при пересоздании; для персистентности
 монтируй `/home/agent` целиком.
 
+## Обслуживание тегов в GHCR
+
+Тег в GHCR нельзя удалить отдельно — удаляется версия пакета, а версия может нести
+несколько тегов (один digest под `latest`, `master`, `sha-*`). Для этого есть
+`prune-image-tag.yml`:
+
+```bash
+# посмотреть, что будет удалено
+gh workflow run prune-image-tag.yml -f tag=main -f dry_run=true
+# удалить (только если тег единственный на версии)
+gh workflow run prune-image-tag.yml -f tag=main
+# удалить вместе с соседними тегами той же версии
+gh workflow run prune-image-tag.yml -f tag=main -f force=true
+```
+
+Работает на `GITHUB_TOKEN` с `packages: write`: локальному `gh` для удаления пакетов
+нужен scope `delete:packages`, которого обычно нет.
+
 ## Публикация образов
 
 CI (`.github/workflows/build.yml`): hadolint → сборка → `verify.sh` → **push только
