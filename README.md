@@ -4,6 +4,8 @@
 починенные права на `$HOME`, полноценный надзор s6-overlay (PID 1 = `/init`),
 предустановленный `gh` CLI.
 
+Ветка по умолчанию — `master`.
+
 ## Зачем
 
 В апстримном образе (`ekkoye8888/hermes-web-ui` поверх `nousresearch/hermes-agent`):
