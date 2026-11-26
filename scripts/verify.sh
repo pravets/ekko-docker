@@ -14,6 +14,9 @@ IMAGE="${1:?usage: verify.sh <image> [--quick]}"
 MODE="${2:-full}"
 UID_ARG="${RUNTIME_UID:-1000}"
 GID_ARG="${RUNTIME_GID:-1000}"
+# Studio's own default is 8648; the deployed compose sets PORT=6060. Pass it
+# explicitly so the check matches the deployment instead of guessing.
+PORT_ARG="${PORT:-6060}"
 NAME="ekko-verify-$$"
 fail=0
 
@@ -52,19 +55,20 @@ fi
 echo
 echo "== booting container as root with HERMES_UID=${UID_ARG} =="
 docker run -d --name "$NAME" \
-  -e HERMES_UID="$UID_ARG" -e HERMES_GID="$GID_ARG" \
+  -e HERMES_UID="$UID_ARG" -e HERMES_GID="$GID_ARG" -e PORT="$PORT_ARG" \
   "$IMAGE" >/dev/null
 
 for _ in $(seq 1 60); do
-  if docker exec "$NAME" sh -c 'curl -fsS -o /dev/null http://127.0.0.1:6060/ 2>/dev/null'; then break; fi
+  if docker exec "$NAME" curl -fsS -o /dev/null "http://127.0.0.1:${PORT_ARG}/" 2>/dev/null; then break; fi
   sleep 2
 done
 
 echo "== runtime checks =="
-if docker exec "$NAME" sh -c 'curl -fsS -o /dev/null http://127.0.0.1:6060/' 2>/dev/null; then
-  pass "studio answers on :6060"
+if docker exec "$NAME" sh -c "curl -fsS -o /dev/null \"http://127.0.0.1:${PORT_ARG}/\"" 2>/dev/null; then
+  pass "studio answers on :${PORT_ARG}"
 else
-  bad "studio does not answer on :6060"; docker logs --tail 30 "$NAME" | sed 's/^/       /'
+  bad "studio does not answer on :${PORT_ARG}"
+  docker logs --tail 20 "$NAME" | sed 's/^/       /'
 fi
 
 docker exec "$NAME" sh -c 'test "$(id -u 1 2>/dev/null || echo 0)" = 0' >/dev/null 2>&1 || true
