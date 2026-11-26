@@ -5,7 +5,7 @@
 #   docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' <container>
 services:
   hermes-webui:
-    image: ${EKKO_CUSTOM_IMAGE:-ekko-docker:v0.8.30}
+    image: ${EKKO_CUSTOM_IMAGE:-ekko-docker:v0.8.32}
     # s6-overlay's stage2 bootstrap needs root for the UID remap and the volume
     # chown; the Studio server itself is dropped to HERMES_UID by s6-setuidgid.
     # Do NOT set `user:` here - an arbitrary --user makes stage2 abort.

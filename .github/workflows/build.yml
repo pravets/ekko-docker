@@ -20,7 +20,7 @@ permissions:
 env:
   RUNTIME_UID: 1000
   RUNTIME_GID: 1000
-  BASE_STUDIO: v0.8.30
+  BASE_STUDIO: v0.8.32
 
 jobs:
   lint:

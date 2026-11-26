@@ -1,0 +1,77 @@
+name: prune-image-tag
+
+# Removes a tag from a published GHCR image.
+#
+# Why a workflow and not a local `gh api` call: deleting package versions needs the
+# `delete:packages` token scope, which the developer's gh token usually lacks. The
+# workflow's own GITHUB_TOKEN gets `packages: write` from the permissions block, and
+# GHCR honours version deletes from it for packages owned by this repository.
+#
+# GHCR images are additive: a tag can be retagged but never removed, so a stale tag
+# (e.g. `main` after the branch was renamed to `master`) has to be deleted as a
+# package version. This deletes the version ONLY if that tag is the sole tag on it,
+# so a shared digest does not take its other tags down with it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to delete (e.g. main)
+        required: true
+        type: string
+      dry_run:
+        description: Only report what would be deleted
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: delete tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PKG: ekko-docker
+          TAG: ${{ inputs.tag }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/user/packages/container/${PKG}/versions?per_page=100"
+          gh api "$api" > versions.json
+          echo "== current versions =="
+          jq -r '.[] | "\(.id)\t\(.metadata.container.tags | join(","))\t\(.updated_at)"' versions.json
+
+          ids=$(jq -r --arg t "$TAG" \
+            '.[] | select((.metadata.container.tags // []) | index($t))
+                 | select((.metadata.container.tags // []) | length == 1) | .id' versions.json)
+
+          if [ -z "$ids" ]; then
+            shared=$(jq -r --arg t "$TAG" \
+              '.[] | select(((.metadata.container.tags // []) | index($t)) and ((.metadata.container.tags // []) | length > 1))
+                   | "\(.id): \(.metadata.container.tags | join(","))"' versions.json)
+            if [ -n "$shared" ]; then
+              echo "::warning::tag '$TAG' shares a version with other tags, not deleting: $shared"
+            else
+              echo "::notice::tag '$TAG' not found - nothing to do"
+            fi
+            exit 0
+          fi
+
+          for id in $ids; do
+            if [ "$DRY" = "true" ]; then
+              echo "would delete version $id"
+            else
+              gh api -X DELETE "https://api.github.com/user/packages/container/${PKG}/versions/${id}"
+              echo "deleted version $id"
+            fi
+          done
+
+          [ "$DRY" = "true" ] && exit 0
+          echo "== after =="
+          gh api "$api" | jq -r '.[] | "\(.id)\t\(.metadata.container.tags | join(","))\t\(.updated_at)"'

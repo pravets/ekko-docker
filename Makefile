@@ -1,5 +1,5 @@
-IMAGE ?= ekko-docker:v0.8.30
-BASE_IMAGE ?= ekkoye8888/hermes-web-ui:v0.8.30
+IMAGE ?= ekko-docker:v0.8.32
+BASE_IMAGE ?= ekkoye8888/hermes-web-ui:v0.8.32
 RUNTIME_UID ?= $(shell id -u)
 RUNTIME_GID ?= $(shell id -g)
 
