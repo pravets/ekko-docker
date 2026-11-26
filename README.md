@@ -4,8 +4,6 @@
 починенные права на `$HOME`, полноценный надзор s6-overlay (PID 1 = `/init`),
 предустановленный `gh` CLI.
 
-Ветка по умолчанию — `master`.
-
 ## Зачем
 
 В апстримном образе (`ekkoye8888/hermes-web-ui` поверх `nousresearch/hermes-agent`):
@@ -176,8 +174,6 @@ Workflow проверяет их наличие и, если их нет, про
 | push в `master` | `latest`, `master`, `sha-<short>`, `studio-v0.8.30` |
 | тег `v1.2.3` | `v1.2.3`, `sha-<short>`, `studio-v0.8.30` |
 | PR | ничего не публикуется |
-
-Ветка по умолчанию — **`master`** (не `main`).
 
 Собирается только `linux/amd64`. Для `arm64` нужен `docker/setup-qemu-action` и
 `platforms: linux/amd64,linux/arm64` (базовый образ arm64 содержит), но тогда
