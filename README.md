@@ -2,7 +2,7 @@
 
 Кастомный Docker-образ [Ekko Studio](https://github.com/EKKOLearnAI/ekko-studio):
 починенные права на `$HOME`, полноценный надзор s6-overlay (PID 1 = `/init`),
-предустановленный `gh` CLI.
+предустановленный `gh` CLI. Ветка по умолчанию — `master`.
 
 ## Зачем
 
