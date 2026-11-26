@@ -24,6 +24,11 @@ on:
         required: false
         default: false
         type: boolean
+      force:
+        description: Delete even when the tag shares a version with other tags
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -40,6 +45,7 @@ jobs:
           PKG: ekko-docker
           TAG: ${{ inputs.tag }}
           DRY: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           api="https://api.github.com/user/packages/container/${PKG}/versions?per_page=100"
@@ -47,9 +53,13 @@ jobs:
           echo "== current versions =="
           jq -r '.[] | "\(.id)\t\(.metadata.container.tags | join(","))\t\(.updated_at)"' versions.json
 
+          # A version can carry several tags (same digest pushed under main and sha-*).
+          # GHCR has no per-tag delete: removing one tag means deleting the whole
+          # version, so shared versions are skipped unless force=true.
           ids=$(jq -r --arg t "$TAG" \
             '.[] | select((.metadata.container.tags // []) | index($t))
-                 | select((.metadata.container.tags // []) | length == 1) | .id' versions.json)
+                 | select(((.metadata.container.tags // []) | length == 1) or ($force == "true")) | .id' \
+            --arg force "$FORCE" versions.json)
 
           if [ -z "$ids" ]; then
             shared=$(jq -r --arg t "$TAG" \
